@@ -2,7 +2,6 @@ use anyhow::Result;
 use convert_case::{Case, Casing};
 use futures::{FutureExt, StreamExt, future::BoxFuture};
 use gpui::{AnyView, App, AsyncApp, Context, Entity, SharedString, Task, Window};
-use http_client::HttpClient;
 use language_model::{
     ApiKeyState, AuthenticateError, EnvVar, IconOrSvg, LanguageModel, LanguageModelCompletionError,
     LanguageModelCompletionEvent, LanguageModelId, LanguageModelName, LanguageModelProvider,
@@ -12,8 +11,11 @@ use language_model::{
 use menu;
 use open_ai::{
     ResponseStreamEvent,
-    responses::{Request as ResponseRequest, StreamEvent as ResponsesStreamEvent, stream_response},
-    stream_completion,
+    responses::{
+        Request as ResponseRequest, StreamEvent as ResponsesStreamEvent,
+        stream_response_with_headers,
+    },
+    stream_completion_with_headers,
 };
 use settings::{Settings, SettingsStore};
 use std::sync::Arc;
@@ -24,6 +26,13 @@ use util::ResultExt;
 use crate::provider::open_ai::{
     OpenAiEventMapper, OpenAiResponseEventMapper, into_open_ai, into_open_ai_response,
 };
+use collections::HashMap;
+use http_client::{
+    HttpClient,
+    http::{HeaderMap, HeaderName, HeaderValue},
+};
+
+pub use settings::HeaderValueContent;
 pub use settings::OpenAiCompatibleAvailableModel as AvailableModel;
 pub use settings::OpenAiCompatibleModelCapabilities as ModelCapabilities;
 
@@ -31,6 +40,7 @@ pub use settings::OpenAiCompatibleModelCapabilities as ModelCapabilities;
 pub struct OpenAiCompatibleSettings {
     pub api_url: String,
     pub available_models: Vec<AvailableModel>,
+    pub headers: Option<HashMap<Arc<str>, HeaderValueContent>>,
 }
 
 pub struct OpenAiCompatibleLanguageModelProvider {
@@ -201,6 +211,30 @@ pub struct OpenAiCompatibleLanguageModel {
 }
 
 impl OpenAiCompatibleLanguageModel {
+    fn resolve_headers(settings: &OpenAiCompatibleSettings) -> Option<HeaderMap> {
+        let mut headers = HeaderMap::new();
+        if let Some(custom_headers) = &settings.headers {
+            for (name, value) in custom_headers {
+                let header_name = HeaderName::from_bytes(name.as_bytes()).log_err()?;
+                let header_value = match value {
+                    HeaderValueContent::Plain(val) => Some(val.clone()),
+                    HeaderValueContent::Env(env) => std::env::var(env).ok(),
+                };
+
+                if let Some(val) = header_value {
+                    let header_value = HeaderValue::from_str(&val).log_err()?;
+                    headers.insert(header_name, header_value);
+                }
+            }
+        }
+
+        if headers.is_empty() {
+            None
+        } else {
+            Some(headers)
+        }
+    }
+
     fn stream_completion(
         &self,
         request: open_ai::Request,
@@ -213,12 +247,10 @@ impl OpenAiCompatibleLanguageModel {
         >,
     > {
         let http_client = self.http_client.clone();
-
-        let (api_key, api_url) = self.state.read_with(cx, |state, _cx| {
-            let api_url = &state.settings.api_url;
+        let (api_key, settings) = self.state.read_with(cx, |state, _cx| {
             (
-                state.api_key_state.key(api_url),
-                state.settings.api_url.clone(),
+                state.api_key_state.key(&state.settings.api_url),
+                state.settings.clone(),
             )
         });
 
@@ -227,14 +259,16 @@ impl OpenAiCompatibleLanguageModel {
             let Some(api_key) = api_key else {
                 return Err(LanguageModelCompletionError::NoApiKey { provider });
             };
-            let request = stream_completion(
+            let headers = Self::resolve_headers(&settings);
+            let request = stream_completion_with_headers(
                 http_client.as_ref(),
                 provider.0.as_str(),
-                &api_url,
+                &settings.api_url,
                 &api_key,
                 request,
+                headers,
             );
-            let response = request.await?;
+            let response = request.await.map_err(LanguageModelCompletionError::from)?;
             Ok(response)
         });
 
@@ -248,12 +282,10 @@ impl OpenAiCompatibleLanguageModel {
     ) -> BoxFuture<'static, Result<futures::stream::BoxStream<'static, Result<ResponsesStreamEvent>>>>
     {
         let http_client = self.http_client.clone();
-
-        let (api_key, api_url) = self.state.read_with(cx, |state, _cx| {
-            let api_url = &state.settings.api_url;
+        let (api_key, settings) = self.state.read_with(cx, |state, _cx| {
             (
-                state.api_key_state.key(api_url),
-                state.settings.api_url.clone(),
+                state.api_key_state.key(&state.settings.api_url),
+                state.settings.clone(),
             )
         });
 
@@ -262,14 +294,16 @@ impl OpenAiCompatibleLanguageModel {
             let Some(api_key) = api_key else {
                 return Err(LanguageModelCompletionError::NoApiKey { provider });
             };
-            let request = stream_response(
+            let headers = Self::resolve_headers(&settings);
+            let request = stream_response_with_headers(
                 http_client.as_ref(),
                 provider.0.as_str(),
-                &api_url,
+                &settings.api_url,
                 &api_key,
                 request,
+                headers,
             );
-            let response = request.await?;
+            let response = request.await.map_err(LanguageModelCompletionError::from)?;
             Ok(response)
         });
 
@@ -494,6 +528,35 @@ impl Render for ConfigurationView {
         let env_var_set = state.api_key_state.is_from_env_var();
         let env_var_name = state.api_key_state.env_var_name();
 
+        let headers_section = state.settings.headers.as_ref().and_then(|headers| {
+            let mut missing_envs = Vec::new();
+            for value in headers.values() {
+                match value {
+                    HeaderValueContent::Plain(_) => {}
+                    HeaderValueContent::Env(env) => {
+                        if std::env::var(env).is_err() {
+                            missing_envs.push(env.clone());
+                        }
+                    }
+                }
+            }
+
+            if missing_envs.is_empty() {
+                return None;
+            }
+
+            Some(
+                v_flex().gap_1().mt_2().child(
+                    Label::new(format!(
+                        "Missing environment variables for headers: {}",
+                        missing_envs.join(", ")
+                    ))
+                    .color(Color::Error)
+                    .size(LabelSize::Small),
+                ),
+            )
+        });
+
         let api_key_section = if self.should_render_editor(cx) {
             v_flex()
                 .on_action(cx.listener(Self::save_api_key))
@@ -509,52 +572,57 @@ impl Render for ConfigurationView {
                     )
                     .size(LabelSize::Small).color(Color::Muted),
                 )
+                .when_some(headers_section, |this, section| this.child(section))
                 .into_any()
         } else {
-            h_flex()
-                .mt_1()
-                .p_1()
-                .justify_between()
-                .rounded_md()
-                .border_1()
-                .border_color(cx.theme().colors().border)
-                .bg(cx.theme().colors().background)
+            v_flex()
                 .child(
                     h_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap_1()
-                        .child(Icon::new(IconName::Check).color(Color::Success))
+                        .mt_1()
+                        .p_1()
+                        .justify_between()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(cx.theme().colors().border)
+                        .bg(cx.theme().colors().background)
                         .child(
-                            div()
-                                .w_full()
-                                .overflow_x_hidden()
-                                .text_ellipsis()
-                                .child(Label::new(
-                                    if env_var_set {
-                                        format!("API key set in {env_var_name} environment variable")
-                                    } else {
-                                        format!("API key configured for {}", &state.settings.api_url)
-                                    }
-                                ))
-                        ),
-                )
-                .child(
-                    h_flex()
-                        .flex_shrink_0()
+                            h_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_1()
+                                .child(Icon::new(IconName::Check).color(Color::Success))
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .overflow_x_hidden()
+                                        .text_ellipsis()
+                                        .child(Label::new(
+                                            if env_var_set {
+                                                format!("API key set in {env_var_name} environment variable")
+                                            } else {
+                                                format!("API key configured for {}", &state.settings.api_url)
+                                            }
+                                        ))
+                                ),
+                        )
                         .child(
-                            Button::new("reset-api-key", "Reset API Key")
-                                .label_size(LabelSize::Small)
-                                .icon(IconName::Undo)
-                                .icon_size(IconSize::Small)
-                                .icon_position(IconPosition::Start)
-                                .layer(ElevationIndex::ModalSurface)
-                                .when(env_var_set, |this| {
-                                    this.tooltip(Tooltip::text(format!("To reset your API key, unset the {env_var_name} environment variable.")))
-                                })
-                                .on_click(cx.listener(|this, _, window, cx| this.reset_api_key(window, cx))),
-                        ),
+                            h_flex()
+                                .flex_shrink_0()
+                                .child(
+                                    Button::new("reset-api-key", "Reset API Key")
+                                        .label_size(LabelSize::Small)
+                                        .icon(IconName::Undo)
+                                        .icon_size(IconSize::Small)
+                                        .icon_position(IconPosition::Start)
+                                        .layer(ElevationIndex::ModalSurface)
+                                        .when(env_var_set, |this| {
+                                            this.tooltip(Tooltip::text(format!("To reset your API key, unset the {env_var_name} environment variable.")))
+                                        })
+                                        .on_click(cx.listener(|this, _, window, cx| this.reset_api_key(window, cx))),
+                                ),
+                        )
                 )
+                .when_some(headers_section, |this, section| this.child(section))
                 .into_any()
         };
 
@@ -563,5 +631,154 @@ impl Render for ConfigurationView {
         } else {
             v_flex().size_full().child(api_key_section).into_any()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    async fn test_resolve_headers_static(cx: &mut TestAppContext) {
+        let mut custom_headers = HashMap::default();
+        custom_headers.insert(
+            "X-Custom-Static".into(),
+            HeaderValueContent::Plain("static-value".into()),
+        );
+
+        let settings = OpenAiCompatibleSettings {
+            api_url: "http://example.com".into(),
+            available_models: vec![],
+            headers: Some(custom_headers),
+        };
+
+        let provider_id = LanguageModelProviderId::new("test");
+        let http_client = http_client::FakeHttpClient::with_404_response();
+        let _model = OpenAiCompatibleLanguageModel {
+            id: LanguageModelId::from("test-model".to_string()),
+            provider_id,
+            provider_name: LanguageModelProviderName::new("test-provider"),
+            model: AvailableModel {
+                name: "test-model".into(),
+                display_name: None,
+                max_tokens: 100,
+                max_output_tokens: None,
+                max_completion_tokens: None,
+                capabilities: ModelCapabilities::default(),
+            },
+            state: cx.new(|_| State {
+                id: "test".into(),
+                api_key_state: ApiKeyState::new(
+                    "http://example.com".into(),
+                    EnvVar::new("TEST_API_KEY".into()),
+                ),
+                settings: settings.clone(),
+            }),
+            http_client,
+            request_limiter: RateLimiter::new(1),
+        };
+
+        let headers = OpenAiCompatibleLanguageModel::resolve_headers(&settings)
+            .expect("headers should be resolved");
+        assert_eq!(headers.get("X-Custom-Static").unwrap(), "static-value");
+    }
+
+    #[gpui::test]
+    async fn test_resolve_headers_env(cx: &mut TestAppContext) {
+        unsafe { std::env::set_var("TEST_HEADER_VAR", "env-value") };
+
+        let mut custom_headers = HashMap::default();
+        custom_headers.insert(
+            "X-Custom-Env".into(),
+            HeaderValueContent::Env("TEST_HEADER_VAR".into()),
+        );
+
+        let settings = OpenAiCompatibleSettings {
+            api_url: "http://example.com".into(),
+            available_models: vec![],
+            headers: Some(custom_headers),
+        };
+
+        let provider_id = LanguageModelProviderId::new("test");
+        let http_client = http_client::FakeHttpClient::with_404_response();
+        let _model = OpenAiCompatibleLanguageModel {
+            id: LanguageModelId::from("test-model".to_string()),
+            provider_id,
+            provider_name: LanguageModelProviderName::new("test-provider"),
+            model: AvailableModel {
+                name: "test-model".into(),
+                display_name: None,
+                max_tokens: 100,
+                max_output_tokens: None,
+                max_completion_tokens: None,
+                capabilities: ModelCapabilities::default(),
+            },
+            state: cx.new(|_| State {
+                id: "test".into(),
+                api_key_state: ApiKeyState::new(
+                    "http://example.com".into(),
+                    EnvVar::new("TEST_API_KEY".into()),
+                ),
+                settings: settings.clone(),
+            }),
+            http_client,
+            request_limiter: RateLimiter::new(1),
+        };
+
+        let headers = OpenAiCompatibleLanguageModel::resolve_headers(&settings)
+            .expect("headers should be resolved");
+        assert_eq!(headers.get("X-Custom-Env").unwrap(), "env-value");
+
+        unsafe { std::env::remove_var("TEST_HEADER_VAR") };
+    }
+
+    #[gpui::test]
+    async fn test_resolve_headers_missing_env(cx: &mut TestAppContext) {
+        unsafe { std::env::remove_var("MISSING_HEADER_VAR") };
+
+        let mut custom_headers = HashMap::default();
+        custom_headers.insert(
+            "X-Custom-Env".into(),
+            HeaderValueContent::Env("MISSING_HEADER_VAR".into()),
+        );
+
+        let settings = OpenAiCompatibleSettings {
+            api_url: "http://example.com".into(),
+            available_models: vec![],
+            headers: Some(custom_headers),
+        };
+
+        let provider_id = LanguageModelProviderId::new("test");
+        let http_client = http_client::FakeHttpClient::with_404_response();
+        let _model = OpenAiCompatibleLanguageModel {
+            id: LanguageModelId::from("test-model".to_string()),
+            provider_id,
+            provider_name: LanguageModelProviderName::new("test-provider"),
+            model: AvailableModel {
+                name: "test-model".into(),
+                display_name: None,
+                max_tokens: 100,
+                max_output_tokens: None,
+                max_completion_tokens: None,
+                capabilities: ModelCapabilities::default(),
+            },
+            state: cx.new(|_| State {
+                id: "test".into(),
+                api_key_state: ApiKeyState::new(
+                    "http://example.com".into(),
+                    EnvVar::new("TEST_API_KEY".into()),
+                ),
+                settings: settings.clone(),
+            }),
+            http_client,
+            request_limiter: RateLimiter::new(1),
+        };
+
+        let headers = OpenAiCompatibleLanguageModel::resolve_headers(&settings);
+        assert!(
+            headers.is_none(),
+            "headers should not be resolved if env var is missing"
+        );
     }
 }

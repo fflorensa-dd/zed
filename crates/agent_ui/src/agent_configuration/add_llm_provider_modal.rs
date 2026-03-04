@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use collections::HashSet;
+use collections::{HashMap, HashSet};
 use fs::Fs;
 use gpui::{
     DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Render, ScrollHandle, Task,
@@ -10,8 +10,8 @@ use language_model::LanguageModelRegistry;
 use language_models::provider::open_ai_compatible::{AvailableModel, ModelCapabilities};
 use settings::{OpenAiCompatibleSettingsContent, update_settings_file};
 use ui::{
-    Banner, Checkbox, KeyBinding, Modal, ModalFooter, ModalHeader, Section, ToggleState,
-    WithScrollbar, prelude::*,
+    Banner, Checkbox, IconButton, KeyBinding, Modal, ModalFooter, ModalHeader, Section,
+    ToggleState, Tooltip, WithScrollbar, prelude::*,
 };
 use ui_input::InputField;
 use workspace::{ModalView, Workspace};
@@ -60,6 +60,7 @@ struct AddLlmProviderInput {
     provider_name: Entity<InputField>,
     api_url: Entity<InputField>,
     api_key: Entity<InputField>,
+    headers: Vec<HeaderInput>,
     models: Vec<ModelInput>,
 }
 
@@ -81,8 +82,19 @@ impl AddLlmProviderInput {
             provider_name,
             api_url,
             api_key,
+            headers: Vec::new(),
             models: vec![ModelInput::new(0, window, cx)],
         }
+    }
+
+    fn add_header(&mut self, window: &mut Window, cx: &mut App) {
+        let header_index = self.headers.len();
+        self.headers
+            .push(HeaderInput::new(header_index, window, cx));
+    }
+
+    fn remove_header(&mut self, index: usize) {
+        self.headers.remove(index);
     }
 
     fn add_model(&mut self, window: &mut Window, cx: &mut App) {
@@ -92,6 +104,45 @@ impl AddLlmProviderInput {
 
     fn remove_model(&mut self, index: usize) {
         self.models.remove(index);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum HeaderValueType {
+    #[default]
+    Plain,
+    Env,
+}
+
+impl HeaderValueType {
+    fn placeholder(&self) -> &'static str {
+        match self {
+            Self::Plain => "Value",
+            Self::Env => "VAR_NAME",
+        }
+    }
+}
+
+struct HeaderInput {
+    name: Entity<InputField>,
+    value: Entity<InputField>,
+    value_type: HeaderValueType,
+}
+
+impl HeaderInput {
+    fn new(header_index: usize, window: &mut Window, cx: &mut App) -> Self {
+        let base_tab_index = (4 + (header_index * 2)) as isize;
+        let name =
+            cx.new(|cx| InputField::new(window, cx, "X-Custom-Header").tab_index(base_tab_index));
+        let value = cx.new(|cx| {
+            InputField::new(window, cx, HeaderValueType::Plain.placeholder())
+                .tab_index(base_tab_index + 1)
+        });
+        Self {
+            name,
+            value,
+            value_type: HeaderValueType::Plain,
+        }
     }
 }
 
@@ -113,7 +164,7 @@ struct ModelInput {
 
 impl ModelInput {
     fn new(model_index: usize, window: &mut Window, cx: &mut App) -> Self {
-        let base_tab_index = (3 + (model_index * 4)) as isize;
+        let base_tab_index = (20 + (model_index * 4)) as isize;
 
         let model_name = single_line_input(
             "Model Name",
@@ -242,6 +293,25 @@ fn save_provider_to_settings(
         return Task::ready(Err("API Key cannot be empty".into()));
     }
 
+    let mut headers = HashMap::default();
+    for header in &input.headers {
+        let name = header.name.read(cx).text(cx).trim().to_string();
+        let value = header.value.read(cx).text(cx).trim().to_string();
+        if name.is_empty() || value.is_empty() {
+            continue;
+        }
+
+        let content = match header.value_type {
+            HeaderValueType::Plain => {
+                language_models::provider::open_ai_compatible::HeaderValueContent::Plain(value)
+            }
+            HeaderValueType::Env => {
+                language_models::provider::open_ai_compatible::HeaderValueContent::Env(value)
+            }
+        };
+        headers.insert(name.into(), content);
+    }
+
     let mut models = Vec::new();
     let mut model_names: HashSet<String> = HashSet::default();
     for model in &input.models {
@@ -273,6 +343,11 @@ fn save_provider_to_settings(
                         OpenAiCompatibleSettingsContent {
                             api_url,
                             available_models: models,
+                            headers: if headers.is_empty() {
+                                None
+                            } else {
+                                Some(headers)
+                            },
                         },
                     );
             });
@@ -328,6 +403,112 @@ impl AddLlmProviderModal {
 
     fn cancel(&mut self, _: &menu::Cancel, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(DismissEvent);
+    }
+
+    fn render_header_section(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        v_flex()
+            .mt_1()
+            .gap_2()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .child(Label::new("Headers").size(LabelSize::Small))
+                    .child(
+                        Button::new("add-header", "Add Header")
+                            .icon(IconName::Plus)
+                            .icon_position(IconPosition::Start)
+                            .icon_size(IconSize::XSmall)
+                            .icon_color(Color::Muted)
+                            .label_size(LabelSize::Small)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.input.add_header(window, cx);
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .children(
+                self.input
+                    .headers
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, _)| self.render_header(ix, cx)),
+            )
+    }
+
+    fn render_header(&self, ix: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let header = &self.input.headers[ix];
+        let (icon, tooltip) = match header.value_type {
+            HeaderValueType::Plain => (IconName::Quote, "Plain text value"),
+            HeaderValueType::Env => (IconName::Cog, "Environment variable name"),
+        };
+
+        v_flex()
+            .p_2()
+            .gap_2()
+            .rounded_sm()
+            .border_1()
+            .border_dashed()
+            .border_color(cx.theme().colors().border.opacity(0.6))
+            .bg(cx.theme().colors().element_active.opacity(0.15))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        div().flex_1().child(
+                            Label::new("Name")
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        ),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                Label::new("Value")
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .child(
+                                IconButton::new(("header-type", ix), icon)
+                                    .icon_size(IconSize::XSmall)
+                                    .tooltip(move |window, cx| Tooltip::text(tooltip)(window, cx))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        let header = &mut this.input.headers[ix];
+                                        header.value_type = match header.value_type {
+                                            HeaderValueType::Plain => HeaderValueType::Env,
+                                            HeaderValueType::Env => HeaderValueType::Plain,
+                                        };
+                                        header.value.update(cx, |input, cx| {
+                                            input.set_placeholder_text(
+                                                header.value_type.placeholder(),
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(div().w_7()),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(div().flex_1().child(header.name.clone()))
+                    .child(div().flex_1().child(header.value.clone()))
+                    .child(
+                        IconButton::new(("remove-header", ix), IconName::Trash)
+                            .icon_size(IconSize::Small)
+                            .icon_color(Color::Muted)
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                this.input.remove_header(ix);
+                                cx.notify();
+                            })),
+                    ),
+            )
     }
 
     fn render_model_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -547,6 +728,7 @@ impl Render for AddLlmProviderModal {
                                     .child(self.input.provider_name.clone())
                                     .child(self.input.api_url.clone())
                                     .child(self.input.api_key.clone())
+                                    .child(self.render_header_section(cx))
                                     .child(self.render_model_section(cx)),
                             ),
                     )
@@ -831,6 +1013,17 @@ mod tests {
         models: Vec<(&str, &str, &str, &str)>,
         cx: &mut VisualTestContext,
     ) -> Option<SharedString> {
+        save_provider_with_headers_validation_errors(provider_name, api_url, api_key, vec![], models, cx).await
+    }
+
+    async fn save_provider_with_headers_validation_errors(
+        provider_name: &str,
+        api_url: &str,
+        api_key: &str,
+        headers: Vec<(&str, &str, HeaderValueType)>,
+        models: Vec<(&str, &str, &str, &str)>,
+        cx: &mut VisualTestContext,
+    ) -> Option<SharedString> {
         fn set_text(input: &Entity<InputField>, text: &str, window: &mut Window, cx: &mut App) {
             input.update(cx, |input, cx| {
                 input.set_text(text, window, cx);
@@ -842,6 +1035,14 @@ mod tests {
             set_text(&input.provider_name, provider_name, window, cx);
             set_text(&input.api_url, api_url, window, cx);
             set_text(&input.api_key, api_key, window, cx);
+
+            for (name, value, value_type) in headers {
+                input.add_header(window, cx);
+                let header = input.headers.last_mut().unwrap();
+                header.value_type = value_type;
+                set_text(&header.name, name, window, cx);
+                set_text(&header.value, value, window, cx);
+            }
 
             for (i, (name, max_tokens, max_completion_tokens, max_output_tokens)) in
                 models.iter().enumerate()
