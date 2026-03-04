@@ -115,6 +115,11 @@ impl InputField {
     pub fn set_text(&self, text: &str, window: &mut Window, cx: &mut App) {
         self.editor().set_text(text, window, cx)
     }
+
+    pub fn set_placeholder_text(&mut self, text: &str, window: &mut Window, cx: &mut App) {
+        self.placeholder = SharedString::new(text);
+        self.editor().set_placeholder_text(text, window, cx);
+    }
 }
 
 impl Render for InputField {

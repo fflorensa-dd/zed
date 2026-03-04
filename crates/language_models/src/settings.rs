@@ -101,6 +101,7 @@ impl settings::Settings for AllLanguageModelSettings {
                         OpenAiCompatibleSettings {
                             api_url: value.api_url,
                             available_models: value.available_models,
+                            headers: value.headers,
                         },
                     )
                 })

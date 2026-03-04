@@ -233,6 +233,14 @@ pub enum OpenAiReasoningEffort {
 pub struct OpenAiCompatibleSettingsContent {
     pub api_url: String,
     pub available_models: Vec<OpenAiCompatibleAvailableModel>,
+    pub headers: Option<HashMap<Arc<str>, HeaderValueContent>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema, MergeFrom)]
+#[serde(tag = "type", content = "value", rename_all = "lowercase")]
+pub enum HeaderValueContent {
+    Plain(String),
+    Env(String),
 }
 
 #[with_fallible_options]

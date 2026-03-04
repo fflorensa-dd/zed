@@ -530,12 +530,30 @@ pub async fn non_streaming_completion(
     api_key: &str,
     request: Request,
 ) -> Result<Response, RequestError> {
+    non_streaming_completion_with_headers(client, api_url, api_key, request, None).await
+}
+
+pub async fn non_streaming_completion_with_headers(
+    client: &dyn HttpClient,
+    api_url: &str,
+    api_key: &str,
+    request: Request,
+    headers: Option<HeaderMap>,
+) -> Result<Response, RequestError> {
     let uri = format!("{api_url}/chat/completions");
-    let request_builder = HttpRequest::builder()
+    let mut request_builder = HttpRequest::builder()
         .method(Method::POST)
         .uri(uri)
         .header("Content-Type", "application/json")
         .header("Authorization", format!("Bearer {}", api_key.trim()));
+
+    if let Some(headers) = headers {
+        for (name, value) in headers {
+            if let Some(name) = name {
+                request_builder = request_builder.header(name, value);
+            }
+        }
+    }
 
     let request = request_builder
         .body(AsyncBody::from(
@@ -577,12 +595,31 @@ pub async fn stream_completion(
     api_key: &str,
     request: Request,
 ) -> Result<BoxStream<'static, Result<ResponseStreamEvent>>, RequestError> {
+    stream_completion_with_headers(client, provider_name, api_url, api_key, request, None).await
+}
+
+pub async fn stream_completion_with_headers(
+    client: &dyn HttpClient,
+    provider_name: &str,
+    api_url: &str,
+    api_key: &str,
+    request: Request,
+    headers: Option<HeaderMap>,
+) -> Result<BoxStream<'static, Result<ResponseStreamEvent>>, RequestError> {
     let uri = format!("{api_url}/chat/completions");
-    let request_builder = HttpRequest::builder()
+    let mut request_builder = HttpRequest::builder()
         .method(Method::POST)
         .uri(uri)
         .header("Content-Type", "application/json")
         .header("Authorization", format!("Bearer {}", api_key.trim()));
+
+    if let Some(headers) = headers {
+        for (name, value) in headers {
+            if let Some(name) = name {
+                request_builder = request_builder.header(name, value);
+            }
+        }
+    }
 
     let request = request_builder
         .body(AsyncBody::from(
@@ -671,6 +708,17 @@ pub fn embed<'a>(
     model: OpenAiEmbeddingModel,
     texts: impl IntoIterator<Item = &'a str>,
 ) -> impl 'static + Future<Output = Result<OpenAiEmbeddingResponse>> {
+    embed_with_headers(client, api_url, api_key, model, texts, None)
+}
+
+pub fn embed_with_headers<'a>(
+    client: &dyn HttpClient,
+    api_url: &str,
+    api_key: &str,
+    model: OpenAiEmbeddingModel,
+    texts: impl IntoIterator<Item = &'a str>,
+    headers: Option<HeaderMap>,
+) -> impl 'static + Future<Output = Result<OpenAiEmbeddingResponse>> {
     let uri = format!("{api_url}/embeddings");
 
     let request = OpenAiEmbeddingRequest {
@@ -678,11 +726,21 @@ pub fn embed<'a>(
         input: texts.into_iter().collect(),
     };
     let body = AsyncBody::from(serde_json::to_string(&request).unwrap());
-    let request = HttpRequest::builder()
+    let mut request_builder = HttpRequest::builder()
         .method(Method::POST)
         .uri(uri)
         .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {}", api_key.trim()))
+        .header("Authorization", format!("Bearer {}", api_key.trim()));
+
+    if let Some(headers) = headers {
+        for (name, value) in headers {
+            if let Some(name) = name {
+                request_builder = request_builder.header(name, value);
+            }
+        }
+    }
+
+    let request = request_builder
         .body(body)
         .map(|request| client.send(request));
 

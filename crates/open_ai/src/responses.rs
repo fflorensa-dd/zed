@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use futures::{AsyncBufReadExt, AsyncReadExt, StreamExt, io::BufReader, stream::BoxStream};
-use http_client::{AsyncBody, HttpClient, Method, Request as HttpRequest};
+use http_client::{AsyncBody, HttpClient, Method, Request as HttpRequest, http::HeaderMap};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -256,12 +256,31 @@ pub async fn stream_response(
     api_key: &str,
     request: Request,
 ) -> Result<BoxStream<'static, Result<StreamEvent>>, RequestError> {
+    stream_response_with_headers(client, provider_name, api_url, api_key, request, None).await
+}
+
+pub async fn stream_response_with_headers(
+    client: &dyn HttpClient,
+    provider_name: &str,
+    api_url: &str,
+    api_key: &str,
+    request: Request,
+    headers: Option<HeaderMap>,
+) -> Result<BoxStream<'static, Result<StreamEvent>>, RequestError> {
     let uri = format!("{api_url}/responses");
-    let request_builder = HttpRequest::builder()
+    let mut request_builder = HttpRequest::builder()
         .method(Method::POST)
         .uri(uri)
         .header("Content-Type", "application/json")
         .header("Authorization", format!("Bearer {}", api_key.trim()));
+
+    if let Some(headers) = headers {
+        for (name, value) in headers {
+            if let Some(name) = name {
+                request_builder = request_builder.header(name, value);
+            }
+        }
+    }
 
     let is_streaming = request.stream;
     let request = request_builder
