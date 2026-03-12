@@ -102,6 +102,8 @@ impl settings::Settings for AllLanguageModelSettings {
                             api_url: value.api_url,
                             available_models: value.available_models,
                             headers: value.headers,
+                            api_key_helper: value.api_key_helper,
+                            api_key_helper_ttl_ms: value.api_key_helper_ttl_ms,
                         },
                     )
                 })

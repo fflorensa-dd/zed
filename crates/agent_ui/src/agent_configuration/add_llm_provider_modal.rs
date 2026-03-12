@@ -60,6 +60,8 @@ struct AddLlmProviderInput {
     provider_name: Entity<InputField>,
     api_url: Entity<InputField>,
     api_key: Entity<InputField>,
+    api_key_helper: Entity<InputField>,
+    api_key_helper_ttl_ms: Entity<InputField>,
     headers: Vec<HeaderInput>,
     models: Vec<ModelInput>,
 }
@@ -70,10 +72,26 @@ impl AddLlmProviderInput {
             single_line_input("Provider Name", provider.name(), None, 1, window, cx);
         let api_url = single_line_input("API URL", provider.api_url(), None, 2, window, cx);
         let api_key = single_line_input(
-            "API Key",
+            "API Key (optional if api_key_helper is set)",
             "000000000000000000000000000000000000000000000000",
             None,
             3,
+            window,
+            cx,
+        );
+        let api_key_helper = single_line_input(
+            "API Key Helper (optional)",
+            "/path/to/helper-script [args...]",
+            None,
+            4,
+            window,
+            cx,
+        );
+        let api_key_helper_ttl_ms = single_line_input(
+            "API Key Helper TTL in ms (optional)",
+            "e.g. 3600000 for 1 hour",
+            None,
+            5,
             window,
             cx,
         );
@@ -82,6 +100,8 @@ impl AddLlmProviderInput {
             provider_name,
             api_url,
             api_key,
+            api_key_helper,
+            api_key_helper_ttl_ms,
             headers: Vec::new(),
             models: vec![ModelInput::new(0, window, cx)],
         }
@@ -289,8 +309,43 @@ fn save_provider_to_settings(
     }
 
     let api_key = input.api_key.read(cx).text(cx);
-    if api_key.is_empty() {
-        return Task::ready(Err("API Key cannot be empty".into()));
+    let api_key_helper = input
+        .api_key_helper
+        .read(cx)
+        .text(cx)
+        .trim()
+        .to_string();
+    let api_key_helper = if api_key_helper.is_empty() {
+        None
+    } else {
+        Some(api_key_helper)
+    };
+
+    let api_key_helper_ttl_ms = {
+        let raw = input
+            .api_key_helper_ttl_ms
+            .read(cx)
+            .text(cx)
+            .trim()
+            .to_string();
+        if raw.is_empty() {
+            None
+        } else {
+            match raw.parse::<u64>() {
+                Ok(ms) => Some(ms),
+                Err(_) => {
+                    return Task::ready(Err(
+                        "API Key Helper TTL must be a positive integer (milliseconds)".into(),
+                    ));
+                }
+            }
+        }
+    };
+
+    if api_key.is_empty() && api_key_helper.is_none() {
+        return Task::ready(Err(
+            "Either an API Key or an API Key Helper must be provided".into(),
+        ));
     }
 
     let mut headers = HashMap::default();
@@ -327,12 +382,19 @@ fn save_provider_to_settings(
     }
 
     let fs = <dyn Fs>::global(cx);
-    let task = cx.write_credentials(&api_url, "Bearer", api_key.as_bytes());
+    let keychain_task = if !api_key.is_empty() {
+        Some(cx.write_credentials(&api_url, "Bearer", api_key.as_bytes()))
+    } else {
+        None
+    };
     cx.spawn(async move |cx| {
-        task.await
-            .map_err(|_| SharedString::from("Failed to write API key to keychain"))?;
+        if let Some(task) = keychain_task {
+            task.await
+                .map_err(|_| SharedString::from("Failed to write API key to keychain"))?;
+        }
+        let api_key_helper_ttl_ms = api_key_helper_ttl_ms;
         cx.update(|cx| {
-            update_settings_file(fs, cx, |settings, _cx| {
+            update_settings_file(fs, cx, move |settings, _cx| {
                 settings
                     .language_models
                     .get_or_insert_default()
@@ -348,6 +410,8 @@ fn save_provider_to_settings(
                             } else {
                                 Some(headers)
                             },
+                            api_key_helper,
+                            api_key_helper_ttl_ms,
                         },
                     );
             });
@@ -728,6 +792,8 @@ impl Render for AddLlmProviderModal {
                                     .child(self.input.provider_name.clone())
                                     .child(self.input.api_url.clone())
                                     .child(self.input.api_key.clone())
+                                    .child(self.input.api_key_helper.clone())
+                                    .child(self.input.api_key_helper_ttl_ms.clone())
                                     .child(self.render_header_section(cx))
                                     .child(self.render_model_section(cx)),
                             ),

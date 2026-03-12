@@ -235,6 +235,12 @@ pub struct OpenAiCompatibleSettingsContent {
     pub api_url: String,
     pub available_models: Vec<OpenAiCompatibleAvailableModel>,
     pub headers: Option<HashMap<Arc<str>, HeaderValueContent>>,
+    /// Path to a script (with optional arguments) that outputs an API key on stdout.
+    /// Example: "/path/to/get-token.sh --env staging"
+    pub api_key_helper: Option<String>,
+    /// How long in milliseconds to cache the API key from api_key_helper before re-running it.
+    /// If not set, the key is cached for the lifetime of the process.
+    pub api_key_helper_ttl_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema, MergeFrom)]
