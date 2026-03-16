@@ -613,6 +613,81 @@ If a provider exposes models that only work with the Responses API, set `chat_co
 Note that LLM API keys aren't stored in your settings file.
 So, ensure you have it set in your environment variables (`<PROVIDER_NAME>_API_KEY=<your api key>`) so your settings can pick it up. In the example above, it would be `TOGETHER_AI_API_KEY=<your api key>`.
 
+#### Custom Headers {#openai-compatible-custom-headers}
+
+Some providers require extra HTTP headers on every request (for example, to select a deployment, pass a project ID, or satisfy gateway authentication). Use `custom_headers` to send them:
+
+```json [settings]
+{
+  "language_models": {
+    "openai_compatible": {
+      "My Provider": {
+        "api_url": "https://my-gateway.example.com/v1",
+        "custom_headers": {
+          "X-Deployment-ID": "prod-42",
+          "X-Project": "my-project"
+        },
+        "available_models": [
+          {
+            "name": "my-model",
+            "max_tokens": 32768
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+Headers are sent with every completion request made to that provider and are not stored in your keychain.
+
+#### API Key Helper {#openai-compatible-api-key-helper}
+
+If your API key is short-lived or must be obtained from a secrets manager, set `api_key_helper` to a shell command whose stdout is used as the key. Zed runs the command through `sh -c` and trims the output:
+
+```json [settings]
+{
+  "language_models": {
+    "openai_compatible": {
+      "My Provider": {
+        "api_url": "https://my-gateway.example.com/v1",
+        "api_key_helper": "cat ~/.config/my-provider/token",
+        "available_models": [
+          {
+            "name": "my-model",
+            "max_tokens": 32768
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+The result is cached for the duration of the Zed session. To limit cache lifetime, set `api_key_helper_ttl_secs` to the number of seconds before the helper is called again:
+
+```json [settings]
+{
+  "language_models": {
+    "openai_compatible": {
+      "My Provider": {
+        "api_url": "https://my-gateway.example.com/v1",
+        "api_key_helper": "aws secretsmanager get-secret-value --secret-id my-key --query SecretString --output text",
+        "api_key_helper_ttl_secs": 3600,
+        "available_models": [
+          {
+            "name": "my-model",
+            "max_tokens": 32768
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+If both an environment variable (`<PROVIDER_NAME>_API_KEY`) and `api_key_helper` are configured, the environment variable takes precedence.
+
 ### OpenRouter {#openrouter}
 
 OpenRouter provides access to multiple AI models through a single API. It supports tool use for compatible models.

@@ -351,6 +351,59 @@ impl AgentConfiguration {
                     .when(
                         is_expanded && is_removable_provider(&provider.id(), cx),
                         |this| {
+                            let workspace = self.workspace.clone();
+                            let edit_provider_id = provider.id();
+                            this.child(
+                                Button::new(
+                                    SharedString::from(format!("edit-provider-{provider_id}")),
+                                    "Edit Provider",
+                                )
+                                .full_width()
+                                .style(ButtonStyle::Outlined)
+                                .start_icon(
+                                    Icon::new(IconName::Pencil)
+                                        .size(IconSize::Small)
+                                        .color(Color::Muted),
+                                )
+                                .label_size(LabelSize::Small)
+                                .on_click(cx.listener(move |_this, _event, window, cx| {
+                                    let settings =
+                                        AllLanguageModelSettings::get_global(cx)
+                                            .openai_compatible
+                                            .get(edit_provider_id.0.as_ref())
+                                            .cloned();
+                                    if let Some(settings) = settings {
+                                        let content =
+                                            settings::OpenAiCompatibleSettingsContent {
+                                                api_url: settings.api_url.clone(),
+                                                available_models: settings.available_models.clone(),
+                                                api_key_helper: settings.api_key_helper.clone(),
+                                                api_key_helper_ttl_secs: settings.api_key_helper_ttl_secs,
+                                                custom_headers: if settings.custom_headers.is_empty() {
+                                                    None
+                                                } else {
+                                                    Some(settings.custom_headers.into_iter().collect())
+                                                },
+                                            };
+                                        workspace
+                                            .update(cx, |workspace, cx| {
+                                                AddLlmProviderModal::toggle_edit(
+                                                    edit_provider_id.0.clone(),
+                                                    &content,
+                                                    workspace,
+                                                    window,
+                                                    cx,
+                                                );
+                                            })
+                                            .log_err();
+                                    }
+                                })),
+                            )
+                        },
+                    )
+                    .when(
+                        is_expanded && is_removable_provider(&provider.id(), cx),
+                        |this| {
                             this.child(
                                 Button::new(
                                     SharedString::from(format!("delete-provider-{provider_id}")),

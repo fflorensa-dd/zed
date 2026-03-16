@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::{ReasoningEffort, RequestError, Role, ToolChoice};
 
-#[derive(Serialize, Debug)]
+#[derive(Clone, Serialize, Debug)]
 pub struct Request {
     pub model: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -31,7 +31,7 @@ pub struct Request {
     pub reasoning: Option<ReasoningConfig>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseInputItem {
     Message(ResponseMessageItem),
@@ -39,20 +39,20 @@ pub enum ResponseInputItem {
     FunctionCallOutput(ResponseFunctionCallOutputItem),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ResponseMessageItem {
     pub role: Role,
     pub content: Vec<ResponseInputContent>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ResponseFunctionCallItem {
     pub call_id: String,
     pub name: String,
     pub arguments: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ResponseFunctionCallOutputItem {
     pub call_id: String,
     pub output: String,
@@ -75,7 +75,7 @@ pub enum ResponseInputContent {
     Refusal { refusal: String },
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Clone, Serialize, Debug)]
 pub struct ReasoningConfig {
     pub effort: ReasoningEffort,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -90,7 +90,7 @@ pub enum ReasoningSummaryMode {
     Detailed,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Clone, Serialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolDefinition {
     Function {
@@ -309,12 +309,26 @@ pub async fn stream_response(
     api_key: &str,
     request: Request,
 ) -> Result<BoxStream<'static, Result<StreamEvent>>, RequestError> {
+    stream_response_with_headers(client, provider_name, api_url, api_key, request, &[]).await
+}
+
+pub async fn stream_response_with_headers(
+    client: &dyn HttpClient,
+    provider_name: &str,
+    api_url: &str,
+    api_key: &str,
+    request: Request,
+    extra_headers: &[(String, String)],
+) -> Result<BoxStream<'static, Result<StreamEvent>>, RequestError> {
     let uri = format!("{api_url}/responses");
-    let request_builder = HttpRequest::builder()
+    let mut request_builder = HttpRequest::builder()
         .method(Method::POST)
         .uri(uri)
         .header("Content-Type", "application/json")
         .header("Authorization", format!("Bearer {}", api_key.trim()));
+    for (key, value) in extra_headers {
+        request_builder = request_builder.header(key.as_str(), value.as_str());
+    }
 
     let is_streaming = request.stream;
     let request = request_builder

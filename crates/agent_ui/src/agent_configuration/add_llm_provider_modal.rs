@@ -3,15 +3,13 @@ use std::sync::Arc;
 use anyhow::Result;
 use collections::HashSet;
 use fs::Fs;
-use gpui::{
-    DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Render, ScrollHandle, Task,
-};
+use gpui::{DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Render, ScrollHandle, Task};
 use language_model::LanguageModelRegistry;
 use language_models::provider::open_ai_compatible::{AvailableModel, ModelCapabilities};
 use settings::{OpenAiCompatibleSettingsContent, update_settings_file};
 use ui::{
-    Banner, Checkbox, KeyBinding, Modal, ModalFooter, ModalHeader, Section, ToggleState,
-    WithScrollbar, prelude::*,
+    Banner, Checkbox, IconButton, KeyBinding, Modal, ModalFooter, ModalHeader, Section, Severity,
+    ToggleState, Tooltip, WithScrollbar, prelude::*,
 };
 use ui_input::InputField;
 use workspace::{ModalView, Workspace};
@@ -20,14 +18,12 @@ fn single_line_input(
     label: impl Into<SharedString>,
     placeholder: &str,
     text: Option<&str>,
-    tab_index: isize,
     window: &mut Window,
     cx: &mut App,
 ) -> Entity<InputField> {
     cx.new(|cx| {
         let input = InputField::new(window, cx, placeholder)
             .label(label)
-            .tab_index(tab_index)
             .tab_stop(true);
 
         if let Some(text) = text {
@@ -56,18 +52,25 @@ impl LlmCompatibleProvider {
     }
 }
 
+struct HeaderInput {
+    key: Entity<InputField>,
+    value: Entity<InputField>,
+}
+
 struct AddLlmProviderInput {
     provider_name: Entity<InputField>,
     api_url: Entity<InputField>,
     api_key: Entity<InputField>,
+    api_key_helper: Entity<InputField>,
+    api_key_helper_ttl: Entity<InputField>,
+    custom_headers: Vec<HeaderInput>,
     models: Vec<ModelInput>,
 }
 
 impl AddLlmProviderInput {
     fn new(provider: LlmCompatibleProvider, window: &mut Window, cx: &mut App) -> Self {
-        let provider_name =
-            single_line_input("Provider Name", provider.name(), None, 1, window, cx);
-        let api_url = single_line_input("API URL", provider.api_url(), None, 2, window, cx);
+        let provider_name = single_line_input("Provider Name", provider.name(), None, window, cx);
+        let api_url = single_line_input("API URL", provider.api_url(), None, window, cx);
         let api_key = cx.new(|cx| {
             InputField::new(
                 window,
@@ -75,26 +78,161 @@ impl AddLlmProviderInput {
                 "000000000000000000000000000000000000000000000000",
             )
             .label("API Key")
-            .tab_index(3)
             .tab_stop(true)
             .masked(true)
         });
+        let api_key_helper = single_line_input(
+            "API Key Helper",
+            "e.g. aws ecr get-login-password",
+            None,
+            window,
+            cx,
+        );
+        let api_key_helper_ttl =
+            single_line_input("API Key TTL (seconds)", "e.g. 3600", None, window, cx);
 
-        Self {
+        let mut input = Self {
             provider_name,
             api_url,
             api_key,
-            models: vec![ModelInput::new(0, window, cx)],
-        }
+            api_key_helper,
+            api_key_helper_ttl,
+            custom_headers: Vec::new(),
+            models: Vec::new(),
+        };
+        input.models.push(ModelInput::new(window, cx));
+        input.recompute_tab_indices(cx);
+        input
+    }
+
+    fn new_for_edit(
+        provider_name_str: &str,
+        settings: &OpenAiCompatibleSettingsContent,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self {
+        let provider_name =
+            single_line_input("Provider Name", provider_name_str, Some(provider_name_str), window, cx);
+        let api_url =
+            single_line_input("API URL", settings.api_url.as_str(), Some(&settings.api_url), window, cx);
+        let api_key = cx.new(|cx| {
+            InputField::new(
+                window,
+                cx,
+                "Leave blank to keep existing key",
+            )
+            .label("API Key")
+            .tab_stop(true)
+            .masked(true)
+        });
+        let helper_text = settings.api_key_helper.as_deref().unwrap_or("");
+        let api_key_helper = single_line_input(
+            "API Key Helper",
+            "e.g. aws ecr get-login-password",
+            if helper_text.is_empty() { None } else { Some(helper_text) },
+            window,
+            cx,
+        );
+        let ttl_text = settings
+            .api_key_helper_ttl_secs
+            .map(|t| t.to_string())
+            .unwrap_or_default();
+        let api_key_helper_ttl = single_line_input(
+            "API Key TTL (seconds)",
+            "e.g. 3600",
+            if ttl_text.is_empty() { None } else { Some(&ttl_text) },
+            window,
+            cx,
+        );
+
+        let custom_headers = settings
+            .custom_headers
+            .as_ref()
+            .map(|headers| {
+                headers
+                    .iter()
+                    .map(|(k, v)| {
+                        HeaderInput {
+                            key: single_line_input("Header Name", "X-Custom-Header", Some(k), window, cx),
+                            value: single_line_input("Value", "value", Some(v), window, cx),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let models = if settings.available_models.is_empty() {
+            vec![ModelInput::new(window, cx)]
+        } else {
+            settings
+                .available_models
+                .iter()
+                .map(|m| ModelInput::new_with_model(m, window, cx))
+                .collect()
+        };
+
+        let input = Self {
+            provider_name,
+            api_url,
+            api_key,
+            api_key_helper,
+            api_key_helper_ttl,
+            custom_headers,
+            models,
+        };
+        input.recompute_tab_indices(cx);
+        input
     }
 
     fn add_model(&mut self, window: &mut Window, cx: &mut App) {
-        let model_index = self.models.len();
-        self.models.push(ModelInput::new(model_index, window, cx));
+        self.models.push(ModelInput::new(window, cx));
+        self.recompute_tab_indices(cx);
     }
 
-    fn remove_model(&mut self, index: usize) {
+    fn remove_model(&mut self, index: usize, cx: &mut App) {
         self.models.remove(index);
+        self.recompute_tab_indices(cx);
+    }
+
+    fn add_header(&mut self, window: &mut Window, cx: &mut App) {
+        self.custom_headers.push(HeaderInput {
+            key: single_line_input("Header Name", "X-Custom-Header", None, window, cx),
+            value: single_line_input("Value", "value", None, window, cx),
+        });
+        self.recompute_tab_indices(cx);
+    }
+
+    fn remove_header(&mut self, index: usize, cx: &mut App) {
+        self.custom_headers.remove(index);
+        self.recompute_tab_indices(cx);
+    }
+
+    fn recompute_tab_indices(&self, cx: &mut App) {
+        let mut next = 1isize;
+
+        let set = |field: &Entity<InputField>, index: &mut isize, cx: &mut App| {
+            let i = *index;
+            field.update(cx, |f, _| f.set_tab_index(i));
+            *index += 1;
+        };
+
+        set(&self.provider_name, &mut next, cx);
+        set(&self.api_url, &mut next, cx);
+        set(&self.api_key, &mut next, cx);
+        set(&self.api_key_helper, &mut next, cx);
+        set(&self.api_key_helper_ttl, &mut next, cx);
+
+        for header in &self.custom_headers {
+            set(&header.key, &mut next, cx);
+            set(&header.value, &mut next, cx);
+        }
+
+        for model in &self.models {
+            set(&model.name, &mut next, cx);
+            set(&model.max_completion_tokens, &mut next, cx);
+            set(&model.max_output_tokens, &mut next, cx);
+            set(&model.max_tokens, &mut next, cx);
+        }
     }
 }
 
@@ -115,41 +253,15 @@ struct ModelInput {
 }
 
 impl ModelInput {
-    fn new(model_index: usize, window: &mut Window, cx: &mut App) -> Self {
-        let base_tab_index = (3 + (model_index * 4)) as isize;
-
-        let model_name = single_line_input(
-            "Model Name",
-            "e.g. gpt-5, claude-opus-4, gemini-2.5-pro",
-            None,
-            base_tab_index + 1,
-            window,
-            cx,
-        );
-        let max_completion_tokens = single_line_input(
-            "Max Completion Tokens",
-            "200000",
-            Some("200000"),
-            base_tab_index + 2,
-            window,
-            cx,
-        );
-        let max_output_tokens = single_line_input(
-            "Max Output Tokens",
-            "Max Output Tokens",
-            Some("32000"),
-            base_tab_index + 3,
-            window,
-            cx,
-        );
-        let max_tokens = single_line_input(
-            "Max Tokens",
-            "Max Tokens",
-            Some("200000"),
-            base_tab_index + 4,
-            window,
-            cx,
-        );
+    fn new(window: &mut Window, cx: &mut App) -> Self {
+        let model_name =
+            single_line_input("Model Name", "e.g. gpt-5, claude-opus-4, gemini-2.5-pro", None, window, cx);
+        let max_completion_tokens =
+            single_line_input("Max Completion Tokens", "200000", Some("200000"), window, cx);
+        let max_output_tokens =
+            single_line_input("Max Output Tokens", "Max Output Tokens", Some("32000"), window, cx);
+        let max_tokens =
+            single_line_input("Max Tokens", "Max Tokens", Some("200000"), window, cx);
 
         let ModelCapabilities {
             tools,
@@ -170,6 +282,55 @@ impl ModelInput {
                 supports_parallel_tool_calls: parallel_tool_calls.into(),
                 supports_prompt_cache_key: prompt_cache_key.into(),
                 supports_chat_completions: chat_completions.into(),
+            },
+        }
+    }
+
+    fn new_with_model(
+        model: &language_models::provider::open_ai_compatible::AvailableModel,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self {
+        let model_name = single_line_input(
+            "Model Name",
+            "e.g. gpt-5, claude-opus-4",
+            Some(&model.name),
+            window,
+            cx,
+        );
+        let max_completion_tokens = single_line_input(
+            "Max Completion Tokens",
+            "200000",
+            Some(&model.max_completion_tokens.unwrap_or(200000).to_string()),
+            window,
+            cx,
+        );
+        let max_output_tokens = single_line_input(
+            "Max Output Tokens",
+            "Max Output Tokens",
+            Some(&model.max_output_tokens.unwrap_or(32000).to_string()),
+            window,
+            cx,
+        );
+        let max_tokens = single_line_input(
+            "Max Tokens",
+            "Max Tokens",
+            Some(&model.max_tokens.to_string()),
+            window,
+            cx,
+        );
+
+        Self {
+            name: model_name,
+            max_completion_tokens,
+            max_output_tokens,
+            max_tokens,
+            capabilities: ModelCapabilityToggles {
+                supports_tools: model.capabilities.tools.into(),
+                supports_images: model.capabilities.images.into(),
+                supports_parallel_tool_calls: model.capabilities.parallel_tool_calls.into(),
+                supports_prompt_cache_key: model.capabilities.prompt_cache_key.into(),
+                supports_chat_completions: model.capabilities.chat_completions.into(),
             },
         }
     }
@@ -215,6 +376,7 @@ impl ModelInput {
 
 fn save_provider_to_settings(
     input: &AddLlmProviderInput,
+    original_provider_name: Option<Arc<str>>,
     cx: &mut App,
 ) -> Task<Result<(), SharedString>> {
     let provider_name: Arc<str> = input.provider_name.read(cx).text(cx).into();
@@ -222,17 +384,32 @@ fn save_provider_to_settings(
         return Task::ready(Err("Provider Name cannot be empty".into()));
     }
 
-    if LanguageModelRegistry::read_global(cx)
-        .providers()
-        .iter()
-        .any(|provider| {
-            provider.id().0.as_ref() == provider_name.as_ref()
-                || provider.name().0.as_ref() == provider_name.as_ref()
-        })
-    {
-        return Task::ready(Err(
-            "Provider Name is already taken by another provider".into()
-        ));
+    let is_edit = original_provider_name.is_some();
+    let is_rename = original_provider_name
+        .as_ref()
+        .map(|orig| orig.as_ref() != provider_name.as_ref())
+        .unwrap_or(false);
+
+    // Only check for name conflicts when adding a new provider or renaming
+    if !is_edit || is_rename {
+        if LanguageModelRegistry::read_global(cx)
+            .providers()
+            .iter()
+            .any(|provider| {
+                // Skip the original provider name in conflict check
+                let id_matches = provider.id().0.as_ref() == provider_name.as_ref();
+                let name_matches = provider.name().0.as_ref() == provider_name.as_ref();
+                (id_matches || name_matches)
+                    && original_provider_name
+                        .as_ref()
+                        .map(|orig| orig.as_ref() != provider.id().0.as_ref())
+                        .unwrap_or(true)
+            })
+        {
+            return Task::ready(Err(
+                "Provider Name is already taken by another provider".into()
+            ));
+        }
     }
 
     let api_url = input.api_url.read(cx).text(cx);
@@ -241,9 +418,46 @@ fn save_provider_to_settings(
     }
 
     let api_key = input.api_key.read(cx).text(cx);
-    if api_key.is_empty() {
+    // In edit mode an empty API key means "keep existing" - only required for new providers
+    if !is_edit && api_key.is_empty() {
         return Task::ready(Err("API Key cannot be empty".into()));
     }
+
+    let api_key_helper = {
+        let text = input.api_key_helper.read(cx).text(cx);
+        if text.is_empty() { None } else { Some(text) }
+    };
+
+    let api_key_helper_ttl_secs = {
+        let text = input.api_key_helper_ttl.read(cx).text(cx);
+        if text.is_empty() {
+            None
+        } else {
+            match text.parse::<u64>() {
+                Ok(v) => Some(v),
+                Err(_) => {
+                    return Task::ready(Err(
+                        "API Key TTL must be a whole number of seconds".into()
+                    ))
+                }
+            }
+        }
+    };
+
+    let mut custom_headers_map = collections::HashMap::default();
+    for header in &input.custom_headers {
+        let key = header.key.read(cx).text(cx);
+        let value = header.value.read(cx).text(cx);
+        if key.is_empty() {
+            return Task::ready(Err("Header Name cannot be empty".into()));
+        }
+        custom_headers_map.insert(key, value);
+    }
+    let custom_headers = if custom_headers_map.is_empty() {
+        None
+    } else {
+        Some(custom_headers_map)
+    };
 
     let mut models = Vec::new();
     let mut model_names: HashSet<String> = HashSet::default();
@@ -260,24 +474,44 @@ fn save_provider_to_settings(
     }
 
     let fs = <dyn Fs>::global(cx);
-    let task = cx.write_credentials(&api_url, "Bearer", api_key.as_bytes());
+
+    // Only write to keychain if a key was provided
+    let keychain_task = if !api_key.is_empty() {
+        Some(cx.write_credentials(&api_url, "Bearer", api_key.as_bytes()))
+    } else {
+        None
+    };
+
     cx.spawn(async move |cx| {
-        task.await
-            .map_err(|_| SharedString::from("Failed to write API key to keychain"))?;
+        if let Some(task) = keychain_task {
+            task.await
+                .map_err(|_| SharedString::from("Failed to write API key to keychain"))?;
+        }
         cx.update(|cx| {
-            update_settings_file(fs, cx, |settings, _cx| {
-                settings
+            update_settings_file(fs, cx, move |settings, _cx| {
+                let compat = settings
                     .language_models
                     .get_or_insert_default()
                     .openai_compatible
-                    .get_or_insert_default()
-                    .insert(
-                        provider_name,
-                        OpenAiCompatibleSettingsContent {
-                            api_url,
-                            available_models: models,
-                        },
-                    );
+                    .get_or_insert_default();
+
+                // Remove the old entry when renaming
+                if is_rename {
+                    if let Some(orig) = &original_provider_name {
+                        compat.remove(orig.as_ref());
+                    }
+                }
+
+                compat.insert(
+                    provider_name,
+                    OpenAiCompatibleSettingsContent {
+                        api_url,
+                        available_models: models,
+                        api_key_helper,
+                        api_key_helper_ttl_secs,
+                        custom_headers,
+                    },
+                );
             });
         });
         Ok(())
@@ -290,6 +524,8 @@ pub struct AddLlmProviderModal {
     scroll_handle: ScrollHandle,
     focus_handle: FocusHandle,
     last_error: Option<SharedString>,
+    /// Set when editing an existing provider; `None` when adding a new one.
+    original_provider_name: Option<Arc<str>>,
 }
 
 impl AddLlmProviderModal {
@@ -302,6 +538,20 @@ impl AddLlmProviderModal {
         workspace.toggle_modal(window, cx, |window, cx| Self::new(provider, window, cx));
     }
 
+    pub fn toggle_edit(
+        provider_name: SharedString,
+        settings: &OpenAiCompatibleSettingsContent,
+        workspace: &mut Workspace,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        let provider_name: Arc<str> = provider_name.as_ref().into();
+        let settings = settings.clone();
+        workspace.toggle_modal(window, cx, move |window, cx| {
+            Self::new_edit(provider_name, &settings, window, cx)
+        });
+    }
+
     fn new(provider: LlmCompatibleProvider, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
             input: AddLlmProviderInput::new(provider, window, cx),
@@ -309,11 +559,29 @@ impl AddLlmProviderModal {
             last_error: None,
             focus_handle: cx.focus_handle(),
             scroll_handle: ScrollHandle::new(),
+            original_provider_name: None,
+        }
+    }
+
+    fn new_edit(
+        provider_name: Arc<str>,
+        settings: &OpenAiCompatibleSettingsContent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self {
+            input: AddLlmProviderInput::new_for_edit(&provider_name, settings, window, cx),
+            provider: LlmCompatibleProvider::OpenAi,
+            last_error: None,
+            focus_handle: cx.focus_handle(),
+            scroll_handle: ScrollHandle::new(),
+            original_provider_name: Some(provider_name),
         }
     }
 
     fn confirm(&mut self, _: &menu::Confirm, _: &mut Window, cx: &mut Context<Self>) {
-        let task = save_provider_to_settings(&self.input, cx);
+        let original = self.original_provider_name.clone();
+        let task = save_provider_to_settings(&self.input, original, cx);
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| match result {
@@ -331,6 +599,63 @@ impl AddLlmProviderModal {
 
     fn cancel(&mut self, _: &menu::Cancel, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(DismissEvent);
+    }
+
+    fn render_custom_headers_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .mt_1()
+            .gap_2()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .child(Label::new("Custom Headers").size(LabelSize::Small))
+                    .child(
+                        Button::new("add-header", "Add Header")
+                            .start_icon(
+                                Icon::new(IconName::Plus)
+                                    .size(IconSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                            .label_size(LabelSize::Small)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.input.add_header(window, cx);
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .children(
+                self.input
+                    .custom_headers
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, _)| self.render_header_row(ix, cx)),
+            )
+    }
+
+    fn render_header_row(&self, ix: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let header = &self.input.custom_headers[ix];
+        h_flex()
+            .gap_1()
+            .child(
+                div()
+                    .flex_1()
+                    .child(header.key.clone()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .child(header.value.clone()),
+            )
+            .child(
+                IconButton::new(("remove-header", ix), IconName::Close)
+                    .icon_size(IconSize::XSmall)
+                    .icon_color(Color::Muted)
+                    .tooltip(Tooltip::text("Remove header"))
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.input.remove_header(ix, cx);
+                        cx.notify();
+                    })),
+            )
     }
 
     fn render_model_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -459,7 +784,7 @@ impl AddLlmProviderModal {
                         .style(ButtonStyle::Outlined)
                         .full_width()
                         .on_click(cx.listener(move |this, _, _window, cx| {
-                            this.input.remove_model(ix);
+                            this.input.remove_model(ix, cx);
                             cx.notify();
                         })),
                 )
@@ -504,6 +829,13 @@ impl Render for AddLlmProviderModal {
             rems_from_px(200.)
         };
 
+        let is_edit = self.original_provider_name.is_some();
+        let title = if is_edit {
+            "Edit LLM Provider"
+        } else {
+            "Add LLM Provider"
+        };
+
         v_flex()
             .id("add-llm-provider-modal")
             .key_context("AddLlmProviderModal")
@@ -517,7 +849,7 @@ impl Render for AddLlmProviderModal {
             }))
             .child(
                 Modal::new("configure-context-server", None)
-                    .header(ModalHeader::new().headline("Add LLM Provider").description(
+                    .header(ModalHeader::new().headline(title).description(
                         match self.provider {
                             LlmCompatibleProvider::OpenAi => {
                                 "This provider will use an OpenAI compatible API."
@@ -552,6 +884,9 @@ impl Render for AddLlmProviderModal {
                                     .child(self.input.provider_name.clone())
                                     .child(self.input.api_url.clone())
                                     .child(self.input.api_key.clone())
+                                    .child(self.input.api_key_helper.clone())
+                                    .child(self.input.api_key_helper_ttl.clone())
+                                    .child(self.render_custom_headers_section(cx))
                                     .child(self.render_model_section(cx)),
                             ),
                     )
@@ -574,7 +909,7 @@ impl Render for AddLlmProviderModal {
                                         })),
                                 )
                                 .child(
-                                    Button::new("save-server", "Save Provider")
+                                    Button::new("save-server", if is_edit { "Save Changes" } else { "Save Provider" })
                                         .key_binding(
                                             KeyBinding::for_action_in(
                                                 &menu::Confirm,
@@ -724,7 +1059,7 @@ mod tests {
         let cx = setup_test(cx).await;
 
         cx.update(|window, cx| {
-            let model_input = ModelInput::new(0, window, cx);
+            let model_input = ModelInput::new(window, cx);
             model_input.name.update(cx, |input, cx| {
                 input.set_text("somemodel", window, cx);
             });
@@ -763,7 +1098,7 @@ mod tests {
         let cx = setup_test(cx).await;
 
         cx.update(|window, cx| {
-            let mut model_input = ModelInput::new(0, window, cx);
+            let mut model_input = ModelInput::new(window, cx);
             model_input.name.update(cx, |input, cx| {
                 input.set_text("somemodel", window, cx);
             });
@@ -788,7 +1123,7 @@ mod tests {
         let cx = setup_test(cx).await;
 
         cx.update(|window, cx| {
-            let mut model_input = ModelInput::new(0, window, cx);
+            let mut model_input = ModelInput::new(window, cx);
             model_input.name.update(cx, |input, cx| {
                 input.set_text("somemodel", window, cx);
             });
@@ -852,7 +1187,7 @@ mod tests {
                 models.iter().enumerate()
             {
                 if i >= input.models.len() {
-                    input.models.push(ModelInput::new(i, window, cx));
+                    input.models.push(ModelInput::new(window, cx));
                 }
                 let model = &mut input.models[i];
                 set_text(&model.name, name, window, cx);
@@ -865,7 +1200,7 @@ mod tests {
                 );
                 set_text(&model.max_output_tokens, max_output_tokens, window, cx);
             }
-            save_provider_to_settings(&input, cx)
+            save_provider_to_settings(&input, None, cx)
         });
 
         task.await.err()

@@ -95,6 +95,10 @@ impl InputField {
         self
     }
 
+    pub fn set_tab_index(&mut self, index: isize) {
+        self.tab_index = Some(index);
+    }
+
     pub fn tab_stop(mut self, tab_stop: bool) -> Self {
         self.tab_stop = tab_stop;
         self

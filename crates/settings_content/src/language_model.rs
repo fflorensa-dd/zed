@@ -234,6 +234,12 @@ pub enum OpenAiReasoningEffort {
 pub struct OpenAiCompatibleSettingsContent {
     pub api_url: String,
     pub available_models: Vec<OpenAiCompatibleAvailableModel>,
+    /// A shell command whose stdout is used as the API key. Takes precedence over the system keychain.
+    pub api_key_helper: Option<String>,
+    /// How long in seconds a key obtained from `api_key_helper` is cached before the helper is called again.
+    pub api_key_helper_ttl_secs: Option<u64>,
+    /// Extra HTTP headers to include in every request sent to this provider.
+    pub custom_headers: Option<HashMap<String, String>>,
 }
 
 #[with_fallible_options]
